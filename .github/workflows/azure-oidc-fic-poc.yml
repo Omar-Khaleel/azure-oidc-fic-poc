@@ -1,0 +1,44 @@
+name: Azure OIDC FIC PoC
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  poc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login via GitHub OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Read dummy Key Vault secret without printing it
+        shell: bash
+        env:
+          KV_SECRET_URL: ${{ vars.KV_SECRET_URL }}
+        run: |
+          set -euo pipefail
+          echo "GITHUB_OIDC_LOGIN_SUCCEEDED=true"
+
+          secret_json="$(az rest --method get --url "$KV_SECRET_URL")"
+
+          secret_value="$(python3 - <<'PY' "$secret_json"
+import json, sys
+print(json.loads(sys.argv[1]).get("value",""))
+PY
+)"
+
+          python3 - <<'PY' "$secret_value"
+import hashlib, sys
+v=sys.argv[1]
+print("KEYVAULT_SECRET_READ_SUCCEEDED=" + str(bool(v)).lower())
+print("KEYVAULT_SECRET_LENGTH_GT_ZERO=" + str(len(v) > 0).lower())
+print("KEYVAULT_SECRET_SHA256=" + hashlib.sha256(v.encode()).hexdigest())
+print("KEYVAULT_SECRET_VALUE_PRINTED=false")
+PY
