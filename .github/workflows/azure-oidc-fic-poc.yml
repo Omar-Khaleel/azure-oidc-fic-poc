@@ -1,47 +1,42 @@
-name: Azure OIDC FIC PoC
+name: Azure OIDC Negative Control
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - "**"
+  workflow_dispatch:
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  poc:
+  negative-control:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Azure login via GitHub OIDC
+      - name: Print non-secret GitHub OIDC context
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+
+          curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" \
+            -o oidc-response.json
+
+          python3 -c 'import json; print(json.load(open("oidc-response.json"))["value"])' > oidc-token.txt
+
+          python3 -c 'import base64,json; token=open("oidc-token.txt").read().strip(); payload=token.split(".")[1]; payload += "=" * (-len(payload) % 4); data=json.loads(base64.urlsafe_b64decode(payload)); print("GITHUB_OIDC_ISSUER=" + data.get("iss","")); print("GITHUB_OIDC_SUBJECT=" + data.get("sub","")); print("GITHUB_OIDC_AUDIENCE=" + str(data.get("aud",""))); print("GITHUB_OIDC_TOKEN_PRINTED=false")'
+
+          rm -f oidc-token.txt oidc-response.json
+
+      - name: Azure login expected to fail because no matching FIC exists
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Read dummy Key Vault secret without printing it
-        shell: bash
-        env:
-          KV_SECRET_URL: ${{ vars.KV_SECRET_URL }}
-        run: |
-          set -euo pipefail
-          echo "GITHUB_OIDC_LOGIN_SUCCEEDED=true"
-
-          secret_json="$(az rest --method get --url "$KV_SECRET_URL")"
-
-          secret_value="$(python3 - <<'PY' "$secret_json"
-import json, sys
-print(json.loads(sys.argv[1]).get("value",""))
-PY
-)"
-
-          python3 - <<'PY' "$secret_value"
-import hashlib, sys
-v=sys.argv[1]
-print("KEYVAULT_SECRET_READ_SUCCEEDED=" + str(bool(v)).lower())
-print("KEYVAULT_SECRET_LENGTH_GT_ZERO=" + str(len(v) > 0).lower())
-print("KEYVAULT_SECRET_SHA256=" + hashlib.sha256(v.encode()).hexdigest())
-print("KEYVAULT_SECRET_VALUE_PRINTED=false")
-PY
