@@ -71,7 +71,18 @@ jobs:
 
           echo "GITHUB_OIDC_LOGIN_SUCCEEDED=true"
 
-          az rest --method get --url "$KV_SECRET_URL" -o json > kv-secret.json
+          kv_token="$(az account get-access-token \
+            --resource https://vault.azure.net \
+            --query accessToken \
+            -o tsv)"
+
+          echo "KEYVAULT_ACCESS_TOKEN_LENGTH_GT_ZERO=$([ -n "$kv_token" ] && echo true || echo false)"
+          echo "KEYVAULT_ACCESS_TOKEN_VALUE_PRINTED=false"
+
+          curl -fsS \
+            -H "Authorization: Bearer $kv_token" \
+            "$KV_SECRET_URL" \
+            -o kv-secret.json
 
           python3 -c 'import json,hashlib; v=json.load(open("kv-secret.json")).get("value",""); print("KEYVAULT_SECRET_READ_SUCCEEDED=" + str(bool(v)).lower()); print("KEYVAULT_SECRET_LENGTH_GT_ZERO=" + str(len(v) > 0).lower()); print("KEYVAULT_SECRET_SHA256=" + hashlib.sha256(v.encode()).hexdigest()); print("KEYVAULT_SECRET_VALUE_PRINTED=false")'
 
