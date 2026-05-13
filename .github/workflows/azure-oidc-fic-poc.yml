@@ -2,6 +2,9 @@ name: Azure OIDC FIC PoC
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - fic-poc-1778652791
 
 permissions:
   id-token: write
@@ -11,12 +14,55 @@ jobs:
   poc:
     runs-on: ubuntu-latest
     steps:
+      - name: Print non-secret context
+        shell: bash
+        run: |
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+          echo "AZURE_CLIENT_ID_SET=${{ vars.AZURE_CLIENT_ID != '' }}"
+          echo "AZURE_TENANT_ID_SET=${{ vars.AZURE_TENANT_ID != '' }}"
+          echo "AZURE_SUBSCRIPTION_ID_SET=${{ vars.AZURE_SUBSCRIPTION_ID != '' }}"
+          echo "KV_SECRET_URL_SET=${{ vars.KV_SECRET_URL != '' }}"
+
+      - name: Print GitHub OIDC subject without token
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_json="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange")"
+
+          token="$(python3 - <<'PY' "$oidc_json"
+import json, sys
+print(json.loads(sys.argv[1])["value"])
+PY
+)"
+
+          python3 - <<'PY' "$token"
+import sys, json, base64
+token=sys.argv[1]
+payload=token.split(".")[1]
+payload += "=" * (-len(payload) % 4)
+data=json.loads(base64.urlsafe_b64decode(payload))
+print("GITHUB_OIDC_ISSUER=" + data.get("iss",""))
+print("GITHUB_OIDC_SUBJECT=" + data.get("sub",""))
+print("GITHUB_OIDC_AUDIENCE=" + str(data.get("aud","")))
+print("GITHUB_OIDC_TOKEN_PRINTED=false")
+PY
+
       - name: Azure login via GitHub OIDC
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify Azure identity without secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          az account show --query '{tenantId:tenantId, subscriptionId:id, user:user}' -o json
+          echo "AZURE_LOGIN_SUCCEEDED=true"
 
       - name: Read dummy Key Vault secret without printing it
         shell: bash
